@@ -100,7 +100,7 @@ public:
     Register<uint32_t> A6;
 
     Register<uint32_t> SP; //Stack Pointer OR A7
-    Register<uint32_t> SR; //Status register
+    Register<uint16_t> SR; //Status register
 
     M68K() {}
 
