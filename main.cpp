@@ -219,11 +219,13 @@ public:
     Register<uint32_t> A4;
     Register<uint32_t> A5;
     Register<uint32_t> A6;
+    Register<uint32_t> A7;
 
-    Register<uint32_t> SP; //Stack Pointer OR A7
+    Register<uint32_t>& SP; //Stack Pointer OR A7
     Register<uint16_t> SR; //Status register
 
-    M68K() {}
+    M68K():
+        SP(A7) {}
 
     void reset() {
         SP.write(memory().read<uint32_t>(0));
