@@ -1,7 +1,56 @@
 #include <iostream>
 #include <vector>
+#include <cstdint>
+#include <cassert>
+#include <stdexcept>
+
+#include <string>
+#include <fstream>
+#include <streambuf>
+
+#include <tr1/functional>
+#include <tr1/unordered_map>
+
+#include <boost/any.hpp>
 
 using namespace std;
+
+template <typename T>
+T swap_endian(const T& t) {
+    uint8_t byte_count = sizeof(T);
+    T byte_mask = 0xFF;
+    T result = 0;
+
+    for (uint8_t i = 0; i < byte_count; i++) {
+        T mask = (byte_mask << (i*8));
+        T val = ((t & mask) >> i*8);
+        uint8_t offset = (byte_count - i - 1)*8;
+        T dest_mask = byte_mask << offset;
+        result |= ((( val ) << offset) & dest_mask);
+    }
+
+    return result;
+}
+
+template <class T>
+inline void hash_combine(std::size_t & seed, const T & v) {
+    std::hash<T> hasher;
+    seed ^= hasher(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+}
+
+namespace std {
+    namespace tr1 {
+        template<typename S, typename T>
+        struct hash<std::pair<S, T> > {
+            inline size_t operator()(const pair<S, T> & v) const {
+                  size_t seed = 0;
+                  ::hash_combine(seed, v.first);
+                  ::hash_combine(seed, v.second);
+                  return seed;
+            }
+        };
+    }
+}
 
 class RAM {
 public:
@@ -15,7 +64,7 @@ public:
         if(!check_read_address(address)) {
             return 0;
         }
-        return *((T*)&bytes_[address]);
+        return swap_endian(*((T*)&bytes_[address]));
     }
 
     template<typename T>
@@ -25,11 +74,24 @@ public:
             return;
         }
         //Cast to pointer of type T then dereference to assign the value
-        *((T*)&bytes_[address]) = data;
+        *((T*)&bytes_[address]) = swap_endian(data);
     }
 
     bool load_from_disk(const std::string& filename) {
+        std::ifstream t(filename.c_str(), std::ios::binary);
 
+        if(!t) {
+            return false;
+        }
+
+        t.seekg(0, std::ios::end);
+        bytes_.reserve(t.tellg());
+        t.seekg(0, std::ios::beg);
+
+        bytes_.assign((std::istreambuf_iterator<char>(t)),
+                    std::istreambuf_iterator<char>());
+
+        return true;
     }
 private:
     virtual bool check_write_address(uint32_t address) { return true; }
@@ -46,43 +108,6 @@ private:
     bool check_write_address(uint32_t address) { return false; }
 };
 
-class MemoryMap {
-public:
-    void add_range(uint32_t low, uint32_t high, RAM* block, uint32_t offset=0) {
-        ranges_[std::make_pair(low, high)] = std::make_pair(block, offset);
-    }
-
-    template<typename T>
-    void write(uint32_t address, T data) {
-        for(RangeMap::const_iterator it = ranges_.begin(); it != ranges_.end(); ++it) {
-            HighLow& range = (*it).first;
-            if(address >= range.first && range < range.second) {
-                RAMOffset& ram_offset = (*it).second;
-                return ram_offset.first->write(address + ram_offset.second, data);
-            }
-        }
-    }
-
-    template<typename T>
-    T read(uint32_t address) {
-        for(RangeMap::const_iterator it = ranges_.begin(); it != ranges_.end(); ++it) {
-            HighLow& range = (*it).first;
-            if(address >= range.first && range < range.second) {
-                RAMOffset& ram_offset = (*it).second;
-                return ram_offset.first->read(address + ram_offset.second);
-            }
-        }
-
-        return 0;
-    }
-
-private:
-    typedef std::pair<uint32_t, uint32_t> HighLow;
-    typedef std::pair<RAM*, uint32_t> RAMOffset;
-    typedef std::unordered_map<HighLow, RAMOffset> RangeMap;
-    RangeMap ranges_;
-};
-
 template<typename T>
 class Register {
 public:
@@ -90,10 +115,72 @@ public:
         value_(0) {}
 
     T read() { return value_; }
-    void write(T value) { value_ = value; }
+    void write(T value) {
+        value_ = value;
 
+        if(signal_changed) {
+            signal_changed(value_);
+        }
+    }
+
+    std::tr1::function<void (T)> signal_changed;
 private:
     T value_;
+};
+
+class MemoryMap {
+public:
+    void add_range(uint32_t low, uint32_t high, RAM* block, uint32_t offset=0) {
+        ranges_[std::make_pair(low, high)] = std::make_pair(block, offset);
+    }
+
+    template<typename T>
+    void map_register(uint32_t address, T* reg) {
+        registers_[address] = boost::any(reg);
+    }
+
+    template<typename T>
+    void write(uint32_t address, T data) {        
+        for(RangeMap::const_iterator it = ranges_.begin(); it != ranges_.end(); ++it) {
+            HighLow& range = (*it).first;
+            if(address >= range.first && address < range.second) {
+                RAMOffset& ram_offset = (*it).second;
+                return ram_offset.first->write((address - range.first) + ram_offset.second, data);
+            }
+        }
+
+        RegisterLookup::const_iterator it = registers_.find(address);
+        if(it != registers_.end()) {
+            boost::any_cast<Register<T>*>((*it).second)->write(data);
+        }
+    }
+
+    template<typename T>
+    T read(uint32_t address) {
+        for(RangeMap::const_iterator it = ranges_.begin(); it != ranges_.end(); ++it) {
+            const HighLow& range = (*it).first;
+            if(address >= range.first && address < range.second) {
+                const RAMOffset& ram_offset = (*it).second;
+                return ram_offset.first->read<T>((address - range.first) + ram_offset.second);
+            }
+        }
+
+        RegisterLookup::const_iterator it = registers_.find(address);
+        if(it != registers_.end()) {
+            return boost::any_cast<Register<T>*>((*it).second)->read();
+        }
+
+        throw std::out_of_range("Tried to access an invalid memory address");
+    }
+
+private:
+    typedef std::pair<uint32_t, uint32_t> HighLow;
+    typedef std::pair<RAM*, uint32_t> RAMOffset;
+    typedef std::tr1::unordered_map<HighLow, RAMOffset> RangeMap;
+    RangeMap ranges_;
+
+    typedef std::tr1::unordered_map<uint32_t, boost::any> RegisterLookup;
+    RegisterLookup registers_;
 };
 
 class CPU {
@@ -138,15 +225,21 @@ public:
 
     M68K() {}
 
+    void reset() {
+        SP.write(memory().read<uint32_t>(0));
+        PC.write(memory().read<uint32_t>(4));
+    }
+
     void tick() {
         //Is the opcode 32 bit?
-        uint32_t opcode = memory().read(PC.read());
+        uint32_t addr = PC.read();
+        uint16_t opcode = memory().read<uint16_t>(addr);
 
         switch(opcode) {
 
         }
 
-        PC.write(PC.read() + 4); //Should this be 4?
+        PC.write(addr + sizeof(opcode));
 
         //Handle interrupts
     }
@@ -154,9 +247,9 @@ public:
 
 class Z80 : public CPU {
 public:
-    Z80();
+    Z80() {}
 
-    void tick();
+    void tick() {}
 
     Register<uint8_t> AF;
     Register<uint16_t> BC;
@@ -182,18 +275,17 @@ int main() {
     RAM vram = RAM(64 * 1024); //64k
 
     //FIXME: add mappings for mirrored data
-    cpu.memory().add_range(0x000000, 0x3FFFFF, &cartridge);
+    cpu.memory().add_range(0x000000, 0x3FFFFF, &tmss);
     cpu.memory().add_range(0xFF0000, 0xFFFFFF, &m68k_ram);
 
     //Map the shared z80 ram
     cpu.memory().add_range(0xA00000, 0xA0FFFF, &z80_ram);
     cpu2.memory().add_range(0x000000, 0x00FFFF, &z80_ram);
 
+    tmss.load_from_disk("../tmss.md");
     cartridge.load_from_disk("./sonic1.bin");
 
-    //Build vector table...
-    cpu.SP.write(cpu.memory().read<uint32_t>(0x000000)); //First value is the stack pointer
-    cpu.PC.write(cpu.memory().read<uint32_t>(0x000004)); //4 bytes in is the address for the program counter
+    cpu.reset();
 
     while(true) {
         cpu.tick();
