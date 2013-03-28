@@ -140,7 +140,7 @@ public:
     }
 
     template<typename T>
-    void write(uint32_t address, T data) {        
+    void write(uint32_t address, T data) {
         for(RangeMap::const_iterator it = ranges_.begin(); it != ranges_.end(); ++it) {
             HighLow& range = (*it).first;
             if(address >= range.first && address < range.second) {
@@ -237,8 +237,63 @@ public:
         uint32_t addr = PC.read();
         uint16_t opcode = memory().read<uint16_t>(addr);
 
-        switch(opcode) {
+        enum FixedInstructions {
+            ILLEGAL = 0x4AFC,
+            RESET = 0x4E70,
+            NOP = 0x4E71,
+            STOP = 0x4E72,
+            RTE = 0x4E73,
+            RTS = 0x4E75,
+            TRAPV = 0x4E76,
+            RTR = 0x4E77
+        };
 
+        switch(opcode) {
+            case ILLEGAL:
+            break;
+            case RESET:
+            break;
+            case NOP:
+            break;
+            case STOP:
+            break;
+            case RTE:
+            break;
+            case RTS:
+            break;
+            case TRAPV:
+            break;
+            case RTR:
+            break;
+            default:
+            //We AND the first 4 bits of the opcode
+            switch(opcode & 0xF000) {
+                case 0x0000: {
+                    //This is the first range of opcodes, which are split into two types determined by the 8th bit
+                    switch(opcode & 0x0100) {
+                        case 0x0000:
+                            //Bits 5, 6 and 7 are identifiers
+                        break;
+                        case 0x0100:
+                            //Bits 5, 6 and 7 are registers
+
+                        break;
+                    }
+                }
+                break;
+                case 0x4000: {
+                    //Second range of opcodes branching mainly
+                    switch(opcode & 0x0EC0) {
+                        case 0x0ECO: //JMP
+                        break;
+                        case 0x0E80: //JSR
+                        break;
+                        default:
+                            assert(false && "Unhandled opcode");
+                    }
+                }
+                break;
+            }
         }
 
         PC.write(addr + sizeof(opcode));
