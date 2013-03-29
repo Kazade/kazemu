@@ -317,6 +317,40 @@ private:
         return source_value;
     }
 
+    void _generate_opcode_variations(const std::string& first_ten_bits, OpcodeCallback cb) {
+        //Generates all combinations of mode/source opcodes
+
+        for(uint8_t M = 0; M < 7; ++M) {
+            std::bitset<3> mval(M);
+            for(uint8_t D = 0; D < 8; ++D) {
+                std::bitset<3> dreg(D);
+
+                uint16_t opcode = std::bitset<16>(first_ten_bits + mval.to_string() + dreg.to_string()).to_ulong();
+                opcode_lookup_[opcode] = cb;
+            }
+        }
+
+        for(uint8_t X = 0; X < 5; ++X) {
+            std::bitset<3> xval(X);
+            uint16_t opcode = std::bitset<16>(first_ten_bits + "111" + xval.to_string()).to_ulong();
+            opcode_lookup_[opcode] = cb;
+        }
+    }
+
+    void _generate_lea_opcodes() {
+        OpcodeCallback lea_handler = std::bind(&M68K::lea, this, std::tr1::placeholders::_1);
+
+        //Build all combinations of the LEA instruction
+        for(uint8_t A = 0; A < 8; ++A) {
+            std::bitset<3> areg(A);
+            _generate_opcode_variations("0100" + areg.to_string() + "111", lea_handler);
+        }
+    }
+
+    void _generate_movem_opcodes() {
+
+    }
+
 public:
     Register<uint32_t> D0;
     Register<uint32_t> D1;
@@ -361,42 +395,6 @@ public:
         uint8_t dest_reg = dest_register(opcode);
         uint32_t source_value = read_source_value<uint32_t>(opcode);
         address_reg(dest_reg).write(source_value);
-    }
-
-    void _generate_lea_opcodes() {
-        OpcodeCallback lea_handler = std::bind(&M68K::lea, this, std::tr1::placeholders::_1);
-
-        //Build all *register* combinations of the LEA instruction
-        for(uint8_t A = 0; A < 8; ++A) {
-            uint16_t LEA;
-            std::bitset<3> areg(A);
-            for(uint8_t M = 0; M < 7; ++M) {
-                std::bitset<3> mval(M);
-                for(uint8_t D = 0; D < 8; ++D) {
-                    std::bitset<3> dreg(D);
-
-                    LEA = std::bitset<16>("0100" + areg.to_string() + "111" + mval.to_string() + dreg.to_string()).to_ulong();
-                    opcode_lookup_[LEA] = lea_handler;
-                }
-            }
-
-            //Now build the non-register versions
-            std::string areg_str = areg.to_string();
-            LEA = std::bitset<16>("0100" + areg_str + "111111010").to_ulong(); //M =111, Xn = 010
-            opcode_lookup_[LEA] = lea_handler;
-
-            LEA = std::bitset<16>("0100" + areg.to_string() + "111111011").to_ulong(); //M =111, Xn = 011
-            opcode_lookup_[LEA] = lea_handler;
-
-            LEA = std::bitset<16>("0100" + areg.to_string() + "111111000").to_ulong(); //M =111, Xn = 000
-            opcode_lookup_[LEA] = lea_handler;
-
-            LEA = std::bitset<16>("0100" + areg.to_string() + "111111001").to_ulong(); //M =111, Xn = 001
-            opcode_lookup_[LEA] = lea_handler;
-
-            LEA = std::bitset<16>("0100" + areg.to_string() + "111111100").to_ulong(); //M =111, Xn = 100
-            opcode_lookup_[LEA] = lea_handler;
-        }
     }
 
     void build_opcode_table() {
