@@ -7,7 +7,9 @@
 #include <string>
 #include <fstream>
 #include <streambuf>
+#include <bitset>
 
+#include <map>
 #include <tr1/functional>
 #include <tr1/unordered_map>
 
@@ -201,7 +203,35 @@ private:
 
 };
 
+void noop(uint16_t opcode) {
+    std::cout << std::bitset<16>(opcode).to_string() << std::endl;
+}
+
+typedef std::tr1::function<void (uint16_t)> OpcodeCallback;
+
+uint8_t source_mode(uint16_t opcode) {
+    uint16_t mode_mask = std::bitset<16>("0000000000111000").to_ulong();
+    uint16_t result = (opcode & mode_mask) >> 3;
+    return result;
+}
+
+uint8_t source_register(uint16_t opcode) {
+    uint16_t mode_mask = std::bitset<16>("0000000000000111").to_ulong();
+    uint16_t result = (opcode & mode_mask);
+    return result;
+}
+
+uint8_t dest_register(uint16_t opcode) {
+    uint16_t mode_mask = std::bitset<16>("0000111000000000").to_ulong();
+    uint16_t result = (opcode & mode_mask) >> 9;
+    return result;
+}
+
 class M68K : public CPU {
+private:
+    Register<uint32_t>* data_registers_[8];
+    Register<uint32_t>* address_registers_[8];
+
 public:
     Register<uint32_t> D0;
     Register<uint32_t> D1;
@@ -225,78 +255,168 @@ public:
     Register<uint16_t> SR; //Status register
 
     M68K():
-        SP(A7) {}
+        data_registers_{ &D0, &D1, &D2, &D3, &D4, &D5, &D6, &D7 },
+        address_registers_{ &A0, &A1, &A2, &A3, &A4, &A5, &A6, &A7 },
+        SP(A7) {
+
+    }
+
+    Register<uint32_t>& data_reg(uint8_t which) { return *data_registers_[which]; }
+    Register<uint32_t>& address_reg(uint8_t which) { return *address_registers_[which]; }
 
     void reset() {
         SP.write(memory().read<uint32_t>(0));
         PC.write(memory().read<uint32_t>(4));
     }
 
+    void lea(uint16_t opcode) {
+        std::cout << "LEA: " << std::bitset<16>(opcode).to_string() << std::endl;
+
+        uint8_t dest_reg = dest_register(opcode);
+
+        uint32_t source_value = 0;
+        uint8_t mode = source_mode(opcode);
+        uint8_t source_reg = source_register(opcode);
+        switch(mode) {
+            case 0: {
+                //Read from data register
+                source_value = data_reg(source_reg).read();
+            } break;
+            case 1: {
+                //Read from address register
+                source_value = address_reg(source_reg).read();
+            } break;
+            case 2: {
+                //Read address from register and get value from memory
+                uint32_t address = address_reg(source_reg).read();
+                source_value = memory().read<uint32_t>(address);
+            } break;
+            case 3: {
+                //Read address from register, get value from memory, then post-increment
+                //address register
+                uint32_t address = address_reg(source_reg).read();
+                source_value = memory().read<uint32_t>(address);
+                address_reg(source_reg).write(address + sizeof(source_value));
+            } break;
+            case 4: {
+                //Read from address with pre-decrement
+                uint32_t address = address_reg(source_reg).read();
+                address -= sizeof(uint32_t);
+                address_reg(source_reg).write(address);
+                source_value = memory().read<uint32_t>(address);
+            } break;
+            case 5: {
+                //The necessary data for this op follows the opcode directly
+                //so we use the program counter to get to it and read a 16bit word
+                uint16_t data = memory().read<uint16_t>(PC.read());
+                PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
+
+                //Read the source value from the address + the data we just read
+                uint32_t address = address_reg(source_reg).read();
+                source_value = memory().read<uint32_t>(address + data);
+            } break;
+            case 6: {
+                assert(0 && "Index not implemented");
+            } break;
+            case 7: {
+                switch(source_reg) {
+                    case 0: {
+                        //Absolute short (imm).W
+                        uint16_t offset = memory().read<uint16_t>(PC.read());
+                        source_value = memory().read<uint32_t>(offset);
+                        PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
+                    } break;
+                    case 1: {
+                        //Absolute long (imm.L)
+                        uint32_t offset = memory().read<uint32_t>(PC.read());
+                        source_value = memory().read<uint32_t>(offset);
+                        PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
+                    } break;
+                    case 2: {
+                        //PC with displacement (d16, PC)
+                        uint16_t offset = memory().read<uint16_t>(PC.read());
+                        source_value = memory().read<uint32_t>(PC.read() + offset);
+                        PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
+                    } break;
+                    case 3: {
+                        //Index not implemented
+                        assert(0 && "Not implemented");
+                    } break;
+                    case 4: {
+                        //Immediate
+                        source_value = (uint32_t) memory().read<uint16_t>(PC.read());
+                        PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
+                    }
+                }
+            }
+        }
+
+        address_reg(dest_reg).write(source_value);
+    }
+
     void tick() {
         //Is the opcode 32 bit?
         uint32_t addr = PC.read();
         uint16_t opcode = memory().read<uint16_t>(addr);
+        PC.write(addr + sizeof(opcode)); //Immediately increment incase we need to read instruction data
 
-        enum FixedInstructions {
-            ILLEGAL = 0x4AFC,
-            RESET = 0x4E70,
-            NOP = 0x4E71,
-            STOP = 0x4E72,
-            RTE = 0x4E73,
-            RTS = 0x4E75,
-            TRAPV = 0x4E76,
-            RTR = 0x4E77
-        };
+        const uint16_t RESET = std::bitset<16>("0100111001110000").to_ulong();
+        const uint16_t NOP = std::bitset<16>("0100111001110001").to_ulong();
+        const uint16_t STOP = std::bitset<16>("0100111001110010").to_ulong();
+        const uint16_t RTE = std::bitset<16>("0100111001110011").to_ulong();
+        const uint16_t RTS = std::bitset<16>("0100111001110001").to_ulong();
+        const uint16_t TRAPV = std::bitset<16>("0100111001110110").to_ulong();
+        const uint16_t RTR = std::bitset<16>("0100111001110111").to_ulong();
 
-        switch(opcode) {
-            case ILLEGAL:
-            break;
-            case RESET:
-            break;
-            case NOP:
-            break;
-            case STOP:
-            break;
-            case RTE:
-            break;
-            case RTS:
-            break;
-            case TRAPV:
-            break;
-            case RTR:
-            break;
-            default:
-            //We AND the first 4 bits of the opcode
-            switch(opcode & 0xF000) {
-                case 0x0000: {
-                    //This is the first range of opcodes, which are split into two types determined by the 8th bit
-                    switch(opcode & 0x0100) {
-                        case 0x0000:
-                            //Bits 5, 6 and 7 are identifiers
-                        break;
-                        case 0x0100:
-                            //Bits 5, 6 and 7 are registers
+        std::map<uint16_t, std::tr1::function<void (uint16_t)> > OPCODE_LOOKUP({
+            { RESET, std::tr1::function<void (uint16_t)>(noop) },
+            { NOP, std::tr1::function<void (uint16_t)>(noop) },
+            { STOP, std::tr1::function<void (uint16_t)>(noop) },
+            { RTE, std::tr1::function<void (uint16_t)>(noop) },
+            { RTS, std::tr1::function<void (uint16_t)>(noop) },
+            { TRAPV, std::tr1::function<void (uint16_t)>(noop) },
+            { RTR, std::tr1::function<void (uint16_t)>(noop) },
+        });
 
-                        break;
-                    }
+        OpcodeCallback lea_handler = std::bind(&M68K::lea, this, std::tr1::placeholders::_1);
+
+        //Build all *register* combinations of the LEA instruction
+        for(uint8_t A = 0; A < 8; ++A) {
+            uint16_t LEA;
+            std::bitset<3> areg(A);
+            for(uint8_t M = 0; M < 7; ++M) {
+                std::bitset<3> mval(M);
+                for(uint8_t D = 0; D < 8; ++D) {
+                    std::bitset<3> dreg(D);
+
+                    LEA = std::bitset<16>("0100" + areg.to_string() + "111" + mval.to_string() + dreg.to_string()).to_ulong();
+                    OPCODE_LOOKUP[LEA] = lea_handler;
                 }
-                break;
-                case 0x4000: {
-                    //Second range of opcodes branching mainly
-                    switch(opcode & 0x0EC0) {
-                        case 0x0ECO: //JMP
-                        break;
-                        case 0x0E80: //JSR
-                        break;
-                        default:
-                            assert(false && "Unhandled opcode");
-                    }
-                }
-                break;
             }
+
+            //Now build the non-register versions
+            std::string areg_str = areg.to_string();
+            LEA = std::bitset<16>("0100" + areg_str + "111111010").to_ulong(); //M =111, Xn = 010
+            OPCODE_LOOKUP[LEA] = lea_handler;
+
+            LEA = std::bitset<16>("0100" + areg.to_string() + "111111011").to_ulong(); //M =111, Xn = 011
+            OPCODE_LOOKUP[LEA] = lea_handler;
+
+            LEA = std::bitset<16>("0100" + areg.to_string() + "111111000").to_ulong(); //M =111, Xn = 000
+            OPCODE_LOOKUP[LEA] = lea_handler;
+
+            LEA = std::bitset<16>("0100" + areg.to_string() + "111111001").to_ulong(); //M =111, Xn = 001
+            OPCODE_LOOKUP[LEA] = lea_handler;
+
+            LEA = std::bitset<16>("0100" + areg.to_string() + "111111100").to_ulong(); //M =111, Xn = 100
+            OPCODE_LOOKUP[LEA] = lea_handler;
         }
 
-        PC.write(addr + sizeof(opcode));
+        if(OPCODE_LOOKUP.find(opcode) != OPCODE_LOOKUP.end()) {
+            OPCODE_LOOKUP[opcode](opcode);
+        } else {
+            std::cout << "UNHANDLED: " << std::bitset<16>(opcode).to_string() << std::endl;
+        }
 
         //Handle interrupts
     }
