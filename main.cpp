@@ -232,6 +232,91 @@ private:
     Register<uint32_t>* data_registers_[8];
     Register<uint32_t>* address_registers_[8];
 
+    typedef std::map<uint16_t, OpcodeCallback > OpcodeTable;
+
+    OpcodeTable opcode_lookup_;
+
+    template<typename T>
+    T read_source_value(uint16_t opcode) {
+        T source_value = 0;
+        uint8_t mode = source_mode(opcode);
+        uint8_t source_reg = source_register(opcode);
+        switch(mode) {
+            case 0: {
+                //Read from data register
+                source_value = data_reg(source_reg).read();
+            } break;
+            case 1: {
+                //Read from address register
+                source_value = address_reg(source_reg).read();
+            } break;
+            case 2: {
+                //Read address from register and get value from memory
+                uint32_t address = address_reg(source_reg).read();
+                source_value = memory().read<T>(address);
+            } break;
+            case 3: {
+                //Read address from register, get value from memory, then post-increment
+                //address register
+                uint32_t address = address_reg(source_reg).read();
+                source_value = memory().read<T>(address);
+                address_reg(source_reg).write(address + sizeof(T));
+            } break;
+            case 4: {
+                //Read from address with pre-decrement
+                uint32_t address = address_reg(source_reg).read();
+                address -= sizeof(T);
+                address_reg(source_reg).write(address);
+                source_value = memory().read<T>(address);
+            } break;
+            case 5: {
+                //The necessary data for this op follows the opcode directly
+                //so we use the program counter to get to it and read a 16bit word
+                uint16_t data = memory().read<uint16_t>(PC.read());
+                PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
+
+                //Read the source value from the address + the data we just read
+                uint32_t address = address_reg(source_reg).read();
+                source_value = memory().read<T>(address + data);
+            } break;
+            case 6: {
+                assert(0 && "Index not implemented");
+            } break;
+            case 7: {
+                switch(source_reg) {
+                    case 0: {
+                        //Absolute short (imm).W
+                        uint16_t offset = memory().read<uint16_t>(PC.read());
+                        source_value = memory().read<T>(offset);
+                        PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
+                    } break;
+                    case 1: {
+                        //Absolute long (imm.L)
+                        uint32_t offset = memory().read<uint32_t>(PC.read());
+                        source_value = memory().read<T>(offset);
+                        PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
+                    } break;
+                    case 2: {
+                        //PC with displacement (d16, PC)
+                        uint16_t offset = memory().read<uint16_t>(PC.read());
+                        source_value = memory().read<T>(PC.read() + offset);
+                        PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
+                    } break;
+                    case 3: {
+                        //Index not implemented
+                        assert(0 && "Not implemented");
+                    } break;
+                    case 4: {
+                        //Immediate
+                        source_value = (T) memory().read<uint16_t>(PC.read());
+                        PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
+                    }
+                }
+            }
+        }
+        return source_value;
+    }
+
 public:
     Register<uint32_t> D0;
     Register<uint32_t> D1;
@@ -259,6 +344,7 @@ public:
         address_registers_{ &A0, &A1, &A2, &A3, &A4, &A5, &A6, &A7 },
         SP(A7) {
 
+        build_opcode_table();
     }
 
     Register<uint32_t>& data_reg(uint8_t which) { return *data_registers_[which]; }
@@ -273,111 +359,11 @@ public:
         std::cout << "LEA: " << std::bitset<16>(opcode).to_string() << std::endl;
 
         uint8_t dest_reg = dest_register(opcode);
-
-        uint32_t source_value = 0;
-        uint8_t mode = source_mode(opcode);
-        uint8_t source_reg = source_register(opcode);
-        switch(mode) {
-            case 0: {
-                //Read from data register
-                source_value = data_reg(source_reg).read();
-            } break;
-            case 1: {
-                //Read from address register
-                source_value = address_reg(source_reg).read();
-            } break;
-            case 2: {
-                //Read address from register and get value from memory
-                uint32_t address = address_reg(source_reg).read();
-                source_value = memory().read<uint32_t>(address);
-            } break;
-            case 3: {
-                //Read address from register, get value from memory, then post-increment
-                //address register
-                uint32_t address = address_reg(source_reg).read();
-                source_value = memory().read<uint32_t>(address);
-                address_reg(source_reg).write(address + sizeof(source_value));
-            } break;
-            case 4: {
-                //Read from address with pre-decrement
-                uint32_t address = address_reg(source_reg).read();
-                address -= sizeof(uint32_t);
-                address_reg(source_reg).write(address);
-                source_value = memory().read<uint32_t>(address);
-            } break;
-            case 5: {
-                //The necessary data for this op follows the opcode directly
-                //so we use the program counter to get to it and read a 16bit word
-                uint16_t data = memory().read<uint16_t>(PC.read());
-                PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
-
-                //Read the source value from the address + the data we just read
-                uint32_t address = address_reg(source_reg).read();
-                source_value = memory().read<uint32_t>(address + data);
-            } break;
-            case 6: {
-                assert(0 && "Index not implemented");
-            } break;
-            case 7: {
-                switch(source_reg) {
-                    case 0: {
-                        //Absolute short (imm).W
-                        uint16_t offset = memory().read<uint16_t>(PC.read());
-                        source_value = memory().read<uint32_t>(offset);
-                        PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
-                    } break;
-                    case 1: {
-                        //Absolute long (imm.L)
-                        uint32_t offset = memory().read<uint32_t>(PC.read());
-                        source_value = memory().read<uint32_t>(offset);
-                        PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
-                    } break;
-                    case 2: {
-                        //PC with displacement (d16, PC)
-                        uint16_t offset = memory().read<uint16_t>(PC.read());
-                        source_value = memory().read<uint32_t>(PC.read() + offset);
-                        PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
-                    } break;
-                    case 3: {
-                        //Index not implemented
-                        assert(0 && "Not implemented");
-                    } break;
-                    case 4: {
-                        //Immediate
-                        source_value = (uint32_t) memory().read<uint16_t>(PC.read());
-                        PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
-                    }
-                }
-            }
-        }
-
+        uint32_t source_value = read_source_value<uint32_t>(opcode);
         address_reg(dest_reg).write(source_value);
     }
 
-    void tick() {
-        //Is the opcode 32 bit?
-        uint32_t addr = PC.read();
-        uint16_t opcode = memory().read<uint16_t>(addr);
-        PC.write(addr + sizeof(opcode)); //Immediately increment incase we need to read instruction data
-
-        const uint16_t RESET = std::bitset<16>("0100111001110000").to_ulong();
-        const uint16_t NOP = std::bitset<16>("0100111001110001").to_ulong();
-        const uint16_t STOP = std::bitset<16>("0100111001110010").to_ulong();
-        const uint16_t RTE = std::bitset<16>("0100111001110011").to_ulong();
-        const uint16_t RTS = std::bitset<16>("0100111001110001").to_ulong();
-        const uint16_t TRAPV = std::bitset<16>("0100111001110110").to_ulong();
-        const uint16_t RTR = std::bitset<16>("0100111001110111").to_ulong();
-
-        std::map<uint16_t, std::tr1::function<void (uint16_t)> > OPCODE_LOOKUP({
-            { RESET, std::tr1::function<void (uint16_t)>(noop) },
-            { NOP, std::tr1::function<void (uint16_t)>(noop) },
-            { STOP, std::tr1::function<void (uint16_t)>(noop) },
-            { RTE, std::tr1::function<void (uint16_t)>(noop) },
-            { RTS, std::tr1::function<void (uint16_t)>(noop) },
-            { TRAPV, std::tr1::function<void (uint16_t)>(noop) },
-            { RTR, std::tr1::function<void (uint16_t)>(noop) },
-        });
-
+    void _generate_lea_opcodes() {
         OpcodeCallback lea_handler = std::bind(&M68K::lea, this, std::tr1::placeholders::_1);
 
         //Build all *register* combinations of the LEA instruction
@@ -390,30 +376,60 @@ public:
                     std::bitset<3> dreg(D);
 
                     LEA = std::bitset<16>("0100" + areg.to_string() + "111" + mval.to_string() + dreg.to_string()).to_ulong();
-                    OPCODE_LOOKUP[LEA] = lea_handler;
+                    opcode_lookup_[LEA] = lea_handler;
                 }
             }
 
             //Now build the non-register versions
             std::string areg_str = areg.to_string();
             LEA = std::bitset<16>("0100" + areg_str + "111111010").to_ulong(); //M =111, Xn = 010
-            OPCODE_LOOKUP[LEA] = lea_handler;
+            opcode_lookup_[LEA] = lea_handler;
 
             LEA = std::bitset<16>("0100" + areg.to_string() + "111111011").to_ulong(); //M =111, Xn = 011
-            OPCODE_LOOKUP[LEA] = lea_handler;
+            opcode_lookup_[LEA] = lea_handler;
 
             LEA = std::bitset<16>("0100" + areg.to_string() + "111111000").to_ulong(); //M =111, Xn = 000
-            OPCODE_LOOKUP[LEA] = lea_handler;
+            opcode_lookup_[LEA] = lea_handler;
 
             LEA = std::bitset<16>("0100" + areg.to_string() + "111111001").to_ulong(); //M =111, Xn = 001
-            OPCODE_LOOKUP[LEA] = lea_handler;
+            opcode_lookup_[LEA] = lea_handler;
 
             LEA = std::bitset<16>("0100" + areg.to_string() + "111111100").to_ulong(); //M =111, Xn = 100
-            OPCODE_LOOKUP[LEA] = lea_handler;
+            opcode_lookup_[LEA] = lea_handler;
         }
+    }
 
-        if(OPCODE_LOOKUP.find(opcode) != OPCODE_LOOKUP.end()) {
-            OPCODE_LOOKUP[opcode](opcode);
+    void build_opcode_table() {
+        const uint16_t RESET = std::bitset<16>("0100111001110000").to_ulong();
+        const uint16_t NOP = std::bitset<16>("0100111001110001").to_ulong();
+        const uint16_t STOP = std::bitset<16>("0100111001110010").to_ulong();
+        const uint16_t RTE = std::bitset<16>("0100111001110011").to_ulong();
+        const uint16_t RTS = std::bitset<16>("0100111001110001").to_ulong();
+        const uint16_t TRAPV = std::bitset<16>("0100111001110110").to_ulong();
+        const uint16_t RTR = std::bitset<16>("0100111001110111").to_ulong();
+
+        opcode_lookup_ = std::map<uint16_t, OpcodeCallback >({
+            { RESET, OpcodeCallback(noop) },
+            { NOP, OpcodeCallback(noop) },
+            { STOP, OpcodeCallback(noop) },
+            { RTE, OpcodeCallback(noop) },
+            { RTS, OpcodeCallback(noop) },
+            { TRAPV, OpcodeCallback(noop) },
+            { RTR, OpcodeCallback(noop) },
+        });
+
+        _generate_lea_opcodes();
+
+    }
+
+    void tick() {
+        uint32_t addr = PC.read();
+        uint16_t opcode = memory().read<uint16_t>(addr);
+        PC.write(addr + sizeof(opcode)); //Immediately increment incase we need to read instruction data
+
+        //Execute the opcode
+        if(opcode_lookup_.find(opcode) != opcode_lookup_.end()) {
+            opcode_lookup_[opcode](opcode);
         } else {
             std::cout << "UNHANDLED: " << std::bitset<16>(opcode).to_string() << std::endl;
         }
