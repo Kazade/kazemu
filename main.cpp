@@ -14,6 +14,7 @@
 #include <tr1/unordered_map>
 
 #include <boost/any.hpp>
+#include <boost/lexical_cast.hpp>
 
 using namespace std;
 
@@ -237,6 +238,50 @@ private:
     OpcodeTable opcode_lookup_;
 
     template<typename T>
+    T read_address(uint16_t opcode) {
+        uint8_t mode = source_mode(opcode);
+        uint8_t source_reg = source_register(opcode);
+
+        switch(mode) {
+            case 2: return address_reg(source_reg).read();
+            case 3: return address_reg(source_reg).read();
+            case 4: return address_reg(source_reg).read();
+            case 5: {
+                T addr = address_reg(source_reg).read();
+                addr += memory().read<uint16_t>(PC.read());
+                PC.write(PC.read() + sizeof(uint16_t));
+                return addr;
+            }
+            case 6: assert(0 && "Index not implemented");
+            case 7: {
+                switch(source_reg) {
+                    case 0: {
+                        T addr = memory().read<uint16_t>(PC.read());
+                        PC.write(PC.read() + sizeof(uint16_t));
+                        return addr;
+                    }
+                    case 1: {
+                        T addr = memory().read<uint32_t>(PC.read());
+                        PC.write(PC.read() + sizeof(uint32_t));
+                        return addr;
+                    }
+                    case 2: {
+                        T addr = PC.read();
+                        addr += memory().read<uint16_t>(PC.read());
+                        PC.write(PC.read() + sizeof(uint16_t));
+                        return addr;
+                    }
+                    case 3: assert(0 && "Not implemented");
+                    default:
+                        assert(0 && "Invalid addressing mode");
+                }
+            }
+            default:
+                assert(0 && "Invalid addressing mode");
+        }
+    }
+
+    template<typename T>
     T read_source_value(uint16_t opcode) {
         T source_value = 0;
         uint8_t mode = source_mode(opcode);
@@ -250,67 +295,35 @@ private:
                 //Read from address register
                 source_value = address_reg(source_reg).read();
             } break;
-            case 2: {
+            case 2:
+            case 5:
+            case 6: {
                 //Read address from register and get value from memory
-                uint32_t address = address_reg(source_reg).read();
-                source_value = memory().read<T>(address);
+                source_value = memory().read<T>(read_address<T>(opcode));
             } break;
             case 3: {
                 //Read address from register, get value from memory, then post-increment
                 //address register
-                uint32_t address = address_reg(source_reg).read();
-                source_value = memory().read<T>(address);
-                address_reg(source_reg).write(address + sizeof(T));
+                T addr = read_address<T>(opcode);
+                source_value = memory().read<T>(addr);
+                address_reg(source_reg).write(addr + sizeof(T));
             } break;
             case 4: {
                 //Read from address with pre-decrement
-                uint32_t address = address_reg(source_reg).read();
+                uint32_t address = read_address<T>(opcode);
                 address -= sizeof(T);
                 address_reg(source_reg).write(address);
                 source_value = memory().read<T>(address);
             } break;
-            case 5: {
-                //The necessary data for this op follows the opcode directly
-                //so we use the program counter to get to it and read a 16bit word
-                uint16_t data = memory().read<uint16_t>(PC.read());
-                PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
-
-                //Read the source value from the address + the data we just read
-                uint32_t address = address_reg(source_reg).read();
-                source_value = memory().read<T>(address + data);
-            } break;
-            case 6: {
-                assert(0 && "Index not implemented");
-            } break;
             case 7: {
                 switch(source_reg) {
-                    case 0: {
-                        //Absolute short (imm).W
-                        uint16_t offset = memory().read<uint16_t>(PC.read());
-                        source_value = memory().read<T>(offset);
-                        PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
-                    } break;
-                    case 1: {
-                        //Absolute long (imm.L)
-                        uint32_t offset = memory().read<uint32_t>(PC.read());
-                        source_value = memory().read<T>(offset);
-                        PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
-                    } break;
-                    case 2: {
-                        //PC with displacement (d16, PC)
-                        uint16_t offset = memory().read<uint16_t>(PC.read());
-                        source_value = memory().read<T>(PC.read() + offset);
-                        PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
-                    } break;
-                    case 3: {
-                        //Index not implemented
-                        assert(0 && "Not implemented");
-                    } break;
                     case 4: {
                         //Immediate
                         source_value = (T) memory().read<uint16_t>(PC.read());
                         PC.write(PC.read() + sizeof(uint16_t)); //Move the program counter to the next instruction
-                    }
+                    } break;
+                    default:
+                        source_value = memory().read<T>(read_address<T>(opcode));
                 }
             }
         }
@@ -348,7 +361,17 @@ private:
     }
 
     void _generate_movem_opcodes() {
+        OpcodeCallback movem_word_handler = std::bind(&M68K::movem<uint16_t>, this, std::tr1::placeholders::_1);
+        OpcodeCallback movem_long_handler = std::bind(&M68K::movem<uint32_t>, this, std::tr1::placeholders::_1);
 
+        for(uint8_t D = 0; D < 2; ++D) {
+            std::string d = (D) ? "1" : "0";
+            std::string first_bits = string("01001") + d + string("001") + string("0");
+            _generate_opcode_variations(first_bits, movem_word_handler);
+
+            first_bits = string("01001") + d + string("001") + string("1");
+            _generate_opcode_variations(first_bits, movem_long_handler);
+        }
     }
 
 public:
@@ -393,8 +416,38 @@ public:
         std::cout << "LEA: " << std::bitset<16>(opcode).to_string() << std::endl;
 
         uint8_t dest_reg = dest_register(opcode);
-        uint32_t source_value = read_source_value<uint32_t>(opcode);
+        uint32_t source_value = read_address<uint32_t>(opcode);
         address_reg(dest_reg).write(source_value);
+    }
+
+    template<typename T>
+    void movem(uint16_t opcode) {
+        std::cout << "MOVEM: " << std::bitset<16>(opcode).to_string() << std::endl;
+
+
+        bool to_register = std::bitset<16>(opcode)[4];
+
+        uint8_t mode = (opcode >> 3) & 7;
+        uint8_t source_reg = opcode & 7;
+
+        //Read the register mask from the program counter
+        std::bitset<16> register_mask(memory().read<uint16_t>(PC.read()));
+        PC.write(PC.read() + sizeof(uint16_t));
+
+        for(uint8_t i = 0; i < 16; ++i) {
+            if(register_mask[i]) {
+                T value = read_source_value<T>(opcode);
+
+                Register<uint32_t>& reg = (i > 7) ? address_reg(i - 8) : data_reg(i);
+
+                if(to_register) {
+                    reg.write(value);
+                } else {
+
+                }
+            }
+        }
+
     }
 
     void build_opcode_table() {
@@ -417,6 +470,7 @@ public:
         });
 
         _generate_lea_opcodes();
+        _generate_movem_opcodes();
 
     }
 
